@@ -1,22 +1,37 @@
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <!--
     ╔══════════════════════════════════════════════════════════════════╗
-    ║                    🐍  MSBuild Snake  🐍                        ║
+    ║                   🐍  MSBuild Snake v2  🐍                      ║
     ║                                                                  ║
-    ║  A real-time Snake game generated entirely by MSBuild.           ║
-    ║  The build IS the game. MSBuild properties control gameplay.     ║
+    ║  EVERY GAME TICK IS A BUILD. MSBuild IS the physics engine.     ║
     ║                                                                  ║
-    ║  Build:  dotnet msbuild -t:Build                                 ║
-    ║  Play:   dotnet msbuild -t:Play                                  ║
-    ║  Custom: dotnet msbuild -t:Play -p:GridSize=30 -p:Speed=80      ║
+    ║  The browser is just a dumb renderer. MSBuild computes:         ║
+    ║  • Snake movement &amp; growth        • Collision detection          ║
+    ║  • Food placement (PRNG in XML)   • Score tracking               ║
+    ║  • Wall layouts                   • Win/lose conditions          ║
+    ║                                                                  ║
+    ║  A tiny bridge server calls `dotnet msbuild -t:Tick` per frame. ║
+    ║  State lives in .state/ files. The build IS the game loop.      ║
     ╚══════════════════════════════════════════════════════════════════╝
+
+    MSBuild escaping cheat sheet (for shell inside Exec):
+      %24 = $    (shell variables, arithmetic)
+      %25 = %    (modulo operator)
+      &amp;  = &amp;    (shell &&)
+      &gt;  = >    (shell redirect)
+      &lt;  = <    (shell comparison)
+      &quot; = "    (quotes)
   -->
 
-  <!-- ═══════════════════ GAME CONFIGURATION ═══════════════════ -->
+  <!-- ═══════════════════ CONFIGURATION ═══════════════════ -->
   <PropertyGroup>
     <GridSize>20</GridSize>
     <CellSize>20</CellSize>
-    <Speed>120</Speed>
+    <Speed>150</Speed>
+    <Difficulty>normal</Difficulty>
+    <WrapAround>false</WrapAround>
+    <InitialLength>3</InitialLength>
+    <GrowthRate>1</GrowthRate>
     <ColorBg>#0a0a0a</ColorBg>
     <ColorGrid>#1a1a1a</ColorGrid>
     <ColorSnake>#4ade80</ColorSnake>
@@ -25,13 +40,12 @@
     <ColorWall>#64748b</ColorWall>
     <ColorText>#e2e8f0</ColorText>
     <ColorAccent>#facc15</ColorAccent>
-    <InitialLength>3</InitialLength>
-    <GrowthRate>1</GrowthRate>
-    <WrapAround>false</WrapAround>
-    <ShowGrid>true</ShowGrid>
-    <Difficulty>normal</Difficulty>
+    <StateDir>$(MSBuildProjectDirectory)/.state</StateDir>
     <OutDir>$(MSBuildProjectDirectory)/build</OutDir>
     <OutFile>$(OutDir)/snake.html</OutFile>
+    <BridgeFile>$(OutDir)/bridge.py</BridgeFile>
+    <Port>8765</Port>
+    <Dir></Dir>
     <_E>%1B</_E>
     <_RST>$(_E)[0m</_RST>
     <_BOLD>$(_E)[1m</_BOLD>
@@ -39,14 +53,14 @@
     <_GRN>$(_E)[32m</_GRN>
     <_YLW>$(_E)[33m</_YLW>
     <_CYN>$(_E)[36m</_CYN>
+    <_RED>$(_E)[31m</_RED>
   </PropertyGroup>
 
-  <!-- Difficulty presets -->
-  <PropertyGroup Condition="'$(Difficulty)' == 'easy'"><Speed>180</Speed></PropertyGroup>
-  <PropertyGroup Condition="'$(Difficulty)' == 'hard'"><Speed>80</Speed></PropertyGroup>
-  <PropertyGroup Condition="'$(Difficulty)' == 'insane'"><Speed>45</Speed></PropertyGroup>
+  <PropertyGroup Condition="'$(Difficulty)' == 'easy'"><Speed>200</Speed></PropertyGroup>
+  <PropertyGroup Condition="'$(Difficulty)' == 'hard'"><Speed>120</Speed></PropertyGroup>
+  <PropertyGroup Condition="'$(Difficulty)' == 'insane'"><Speed>80</Speed></PropertyGroup>
 
-  <!-- Wall layouts for hard/insane -->
+  <!-- Walls -->
   <ItemGroup Condition="'$(Difficulty)' == 'hard' Or '$(Difficulty)' == 'insane'">
     <Wall Include="w1"><X>10</X><Y>5</Y></Wall>
     <Wall Include="w2"><X>10</X><Y>6</Y></Wall>
@@ -76,11 +90,247 @@
     <Wall Include="w24"><X>15</X><Y>16</Y></Wall>
   </ItemGroup>
 
+  <!-- ═══════════════════ NEW GAME ═══════════════════ -->
+  <Target Name="New">
+    <RemoveDir Directories="$(StateDir)" />
+    <MakeDir Directories="$(StateDir)" />
+
+    <PropertyGroup>
+      <_CX>$([System.Math]::Floor($([MSBuild]::Divide($(GridSize), 2))))</_CX>
+      <_CY>$([System.Math]::Floor($([MSBuild]::Divide($(GridSize), 2))))</_CY>
+    </PropertyGroup>
+    <PropertyGroup>
+      <_S2X>$([MSBuild]::Subtract($(_CX), 1))</_S2X>
+      <_S3X>$([MSBuild]::Subtract($(_CX), 2))</_S3X>
+    </PropertyGroup>
+
+    <WriteLinesToFile File="$(StateDir)/snake" Overwrite="true" Lines="$(_CX),$(_CY)|$(_S2X),$(_CY)|$(_S3X),$(_CY)" />
+    <WriteLinesToFile File="$(StateDir)/dir" Overwrite="true" Lines="right" />
+    <WriteLinesToFile File="$(StateDir)/score" Overwrite="true" Lines="0" />
+    <WriteLinesToFile File="$(StateDir)/alive" Overwrite="true" Lines="true" />
+    <WriteLinesToFile File="$(StateDir)/grow" Overwrite="true" Lines="0" />
+    <WriteLinesToFile File="$(StateDir)/ticks" Overwrite="true" Lines="0" />
+
+    <ItemGroup><_WC Include="@(Wall)" /></ItemGroup>
+    <PropertyGroup>
+      <_WallData>@(_WC->'%(X),%(Y)', '|')</_WallData>
+    </PropertyGroup>
+    <WriteLinesToFile File="$(StateDir)/walls" Overwrite="true" Lines="$(_WallData)" />
+
+    <!-- Place initial food -->
+    <Exec Command="
+SEED=%24((%24RANDOM + %24%24))
+G=$(GridSize)
+WALLS=&quot;$(_WallData)&quot;
+CX=$(_CX)
+CY=$(_CY)
+S2X=$(_S2X)
+S3X=$(_S3X)
+TRIES=0
+while [ %24TRIES -lt 200 ]; do
+  FX=%24((SEED %25 G))
+  FY=%24(( (SEED / G + SEED * 3) %25 G ))
+  SEED=%24((SEED + 7))
+  TRIES=%24((TRIES + 1))
+  if [ &quot;%24FX,%24FY&quot; = &quot;%24CX,%24CY&quot; ] || [ &quot;%24FX,%24FY&quot; = &quot;%24S2X,%24CY&quot; ] || [ &quot;%24FX,%24FY&quot; = &quot;%24S3X,%24CY&quot; ]; then
+    continue
+  fi
+  ONWALL=0
+  if [ -n &quot;%24WALLS&quot; ]; then
+    OLDIFS=%24IFS
+    IFS='|'
+    for w in %24WALLS; do
+      if [ &quot;%24FX,%24FY&quot; = &quot;%24w&quot; ]; then ONWALL=1; break; fi
+    done
+    IFS=%24OLDIFS
+  fi
+  if [ %24ONWALL -eq 0 ]; then break; fi
+done
+echo &quot;%24FX,%24FY&quot; &gt; &quot;$(StateDir)/food&quot;
+" />
+
+    <Message Importance="high" Text=" " />
+    <Message Importance="high" Text="$(_BOLD)$(_GRN)  🐍 New game started!$(_RST)" />
+    <Message Importance="high" Text="  Grid: $(GridSize)×$(GridSize)  Difficulty: $(Difficulty)" />
+    <Message Importance="high" Text=" " />
+  </Target>
+
+  <!-- ═══════════════════ TICK — THE GAME ENGINE ═══════════════════ -->
+  <Target Name="Tick">
+    <ReadLinesFromFile File="$(StateDir)/snake"><Output TaskParameter="Lines" PropertyName="_SnakeRaw" /></ReadLinesFromFile>
+    <ReadLinesFromFile File="$(StateDir)/dir"><Output TaskParameter="Lines" PropertyName="_CurDir" /></ReadLinesFromFile>
+    <ReadLinesFromFile File="$(StateDir)/food"><Output TaskParameter="Lines" PropertyName="_FoodRaw" /></ReadLinesFromFile>
+    <ReadLinesFromFile File="$(StateDir)/score"><Output TaskParameter="Lines" PropertyName="_Score" /></ReadLinesFromFile>
+    <ReadLinesFromFile File="$(StateDir)/alive"><Output TaskParameter="Lines" PropertyName="_Alive" /></ReadLinesFromFile>
+    <ReadLinesFromFile File="$(StateDir)/grow"><Output TaskParameter="Lines" PropertyName="_Grow" /></ReadLinesFromFile>
+    <ReadLinesFromFile File="$(StateDir)/ticks"><Output TaskParameter="Lines" PropertyName="_Ticks" /></ReadLinesFromFile>
+    <ReadLinesFromFile File="$(StateDir)/walls"><Output TaskParameter="Lines" PropertyName="_WallsRaw" /></ReadLinesFromFile>
+
+    <Exec Command="
+ALIVE=&quot;$(_Alive)&quot;
+if [ &quot;%24ALIVE&quot; != &quot;true&quot; ]; then
+  echo '{&quot;alive&quot;:false,&quot;score&quot;:$(_Score),&quot;snake&quot;:&quot;$(_SnakeRaw)&quot;,&quot;food&quot;:&quot;$(_FoodRaw)&quot;,&quot;walls&quot;:&quot;$(_WallsRaw)&quot;,&quot;dir&quot;:&quot;$(_CurDir)&quot;,&quot;ticks&quot;:$(_Ticks)}'
+  exit 0
+fi
+
+G=$(GridSize)
+WRAP=&quot;$(WrapAround)&quot;
+GROW_RATE=$(GrowthRate)
+DIR=&quot;$(_CurDir)&quot;
+INPUT_DIR=&quot;$(Dir)&quot;
+SNAKE=&quot;$(_SnakeRaw)&quot;
+FOOD=&quot;$(_FoodRaw)&quot;
+SCORE=$(_Score)
+GROW_PENDING=$(_Grow)
+TICKS=$(_Ticks)
+WALLS=&quot;$(_WallsRaw)&quot;
+
+# Apply direction (prevent 180)
+case &quot;%24INPUT_DIR&quot; in
+  up)    [ &quot;%24DIR&quot; != &quot;down&quot; ]  &amp;&amp; DIR=&quot;up&quot; ;;
+  down)  [ &quot;%24DIR&quot; != &quot;up&quot; ]    &amp;&amp; DIR=&quot;down&quot; ;;
+  left)  [ &quot;%24DIR&quot; != &quot;right&quot; ] &amp;&amp; DIR=&quot;left&quot; ;;
+  right) [ &quot;%24DIR&quot; != &quot;left&quot; ]  &amp;&amp; DIR=&quot;right&quot; ;;
+esac
+
+# Get head
+HEAD=%24(echo &quot;%24SNAKE&quot; | cut -d'|' -f1)
+HX=%24(echo &quot;%24HEAD&quot; | cut -d',' -f1)
+HY=%24(echo &quot;%24HEAD&quot; | cut -d',' -f2)
+
+# Compute new head
+case &quot;%24DIR&quot; in
+  up)    NY=%24((HY - 1)); NX=%24HX ;;
+  down)  NY=%24((HY + 1)); NX=%24HX ;;
+  left)  NX=%24((HX - 1)); NY=%24HY ;;
+  right) NX=%24((HX + 1)); NY=%24HY ;;
+esac
+
+# Boundary
+if [ &quot;%24WRAP&quot; = &quot;true&quot; ]; then
+  NX=%24(( (NX + G) %25 G ))
+  NY=%24(( (NY + G) %25 G ))
+else
+  if [ %24NX -lt 0 ] || [ %24NX -ge %24G ] || [ %24NY -lt 0 ] || [ %24NY -ge %24G ]; then
+    echo &quot;false&quot; &gt; &quot;$(StateDir)/alive&quot;
+    TICKS=%24((TICKS + 1))
+    echo &quot;%24TICKS&quot; &gt; &quot;$(StateDir)/ticks&quot;
+    echo '{&quot;alive&quot;:false,&quot;score&quot;:'%24SCORE',&quot;snake&quot;:&quot;'%24SNAKE'&quot;,&quot;food&quot;:&quot;'%24FOOD'&quot;,&quot;walls&quot;:&quot;'%24WALLS'&quot;,&quot;dir&quot;:&quot;'%24DIR'&quot;,&quot;ticks&quot;:'%24TICKS',&quot;cause&quot;:&quot;wall&quot;}'
+    exit 0
+  fi
+fi
+
+# Wall collision
+if [ -n &quot;%24WALLS&quot; ]; then
+  OLDIFS=%24IFS; IFS='|'
+  for w in %24WALLS; do
+    if [ &quot;%24NX,%24NY&quot; = &quot;%24w&quot; ]; then
+      IFS=%24OLDIFS
+      echo &quot;false&quot; &gt; &quot;$(StateDir)/alive&quot;
+      TICKS=%24((TICKS + 1))
+      echo &quot;%24TICKS&quot; &gt; &quot;$(StateDir)/ticks&quot;
+      echo '{&quot;alive&quot;:false,&quot;score&quot;:'%24SCORE',&quot;snake&quot;:&quot;'%24SNAKE'&quot;,&quot;food&quot;:&quot;'%24FOOD'&quot;,&quot;walls&quot;:&quot;'%24WALLS'&quot;,&quot;dir&quot;:&quot;'%24DIR'&quot;,&quot;ticks&quot;:'%24TICKS',&quot;cause&quot;:&quot;obstacle&quot;}'
+      exit 0
+    fi
+  done
+  IFS=%24OLDIFS
+fi
+
+# Self collision
+OLDIFS=%24IFS; IFS='|'
+for seg in %24SNAKE; do
+  if [ &quot;%24NX,%24NY&quot; = &quot;%24seg&quot; ]; then
+    IFS=%24OLDIFS
+    echo &quot;false&quot; &gt; &quot;$(StateDir)/alive&quot;
+    TICKS=%24((TICKS + 1))
+    echo &quot;%24TICKS&quot; &gt; &quot;$(StateDir)/ticks&quot;
+    echo '{&quot;alive&quot;:false,&quot;score&quot;:'%24SCORE',&quot;snake&quot;:&quot;'%24SNAKE'&quot;,&quot;food&quot;:&quot;'%24FOOD'&quot;,&quot;walls&quot;:&quot;'%24WALLS'&quot;,&quot;dir&quot;:&quot;'%24DIR'&quot;,&quot;ticks&quot;:'%24TICKS',&quot;cause&quot;:&quot;self&quot;}'
+    exit 0
+  fi
+done
+IFS=%24OLDIFS
+
+# Move: prepend new head
+NEW_SNAKE=&quot;%24NX,%24NY|%24SNAKE&quot;
+
+# Check food
+ATE=0
+FX=%24(echo &quot;%24FOOD&quot; | cut -d',' -f1)
+FY=%24(echo &quot;%24FOOD&quot; | cut -d',' -f2)
+if [ %24NX -eq %24FX ] &amp;&amp; [ %24NY -eq %24FY ]; then
+  ATE=1
+  SCORE=%24((SCORE + 10))
+  GROW_PENDING=%24((GROW_PENDING + GROW_RATE))
+fi
+
+# Remove tail unless growing
+if [ %24GROW_PENDING -gt 0 ]; then
+  GROW_PENDING=%24((GROW_PENDING - 1))
+else
+  NEW_SNAKE=%24(echo &quot;%24NEW_SNAKE&quot; | sed 's/|[^|]*%24//')
+fi
+
+TICKS=%24((TICKS + 1))
+
+# Write state
+echo &quot;%24NEW_SNAKE&quot; &gt; &quot;$(StateDir)/snake&quot;
+echo &quot;%24DIR&quot; &gt; &quot;$(StateDir)/dir&quot;
+echo &quot;%24SCORE&quot; &gt; &quot;$(StateDir)/score&quot;
+echo &quot;%24GROW_PENDING&quot; &gt; &quot;$(StateDir)/grow&quot;
+echo &quot;%24TICKS&quot; &gt; &quot;$(StateDir)/ticks&quot;
+
+# Place new food if eaten
+if [ %24ATE -eq 1 ]; then
+  SEED=%24((TICKS * 7 + SCORE * 13 + NX * 3 + NY * 11))
+  FTRIES=0
+  while [ %24FTRIES -lt 200 ]; do
+    NFX=%24((SEED %25 G))
+    NFY=%24(( (SEED / G + SEED * 3) %25 G ))
+    SEED=%24((SEED + 7 + FTRIES))
+    FTRIES=%24((FTRIES + 1))
+    ON_SNAKE=0
+    OIFS=%24IFS; IFS='|'
+    for seg in %24NEW_SNAKE; do
+      if [ &quot;%24NFX,%24NFY&quot; = &quot;%24seg&quot; ]; then ON_SNAKE=1; break; fi
+    done; IFS=%24OIFS
+    [ %24ON_SNAKE -eq 1 ] &amp;&amp; continue
+    ON_WALL=0
+    if [ -n &quot;%24WALLS&quot; ]; then
+      OIFS=%24IFS; IFS='|'
+      for w in %24WALLS; do
+        if [ &quot;%24NFX,%24NFY&quot; = &quot;%24w&quot; ]; then ON_WALL=1; break; fi
+      done; IFS=%24OIFS
+    fi
+    [ %24ON_WALL -eq 1 ] &amp;&amp; continue
+    break
+  done
+  echo &quot;%24NFX,%24NFY&quot; &gt; &quot;$(StateDir)/food&quot;
+  FOOD=&quot;%24NFX,%24NFY&quot;
+fi
+
+echo '{&quot;alive&quot;:true,&quot;score&quot;:'%24SCORE',&quot;snake&quot;:&quot;'%24NEW_SNAKE'&quot;,&quot;food&quot;:&quot;'%24FOOD'&quot;,&quot;walls&quot;:&quot;'%24WALLS'&quot;,&quot;dir&quot;:&quot;'%24DIR'&quot;,&quot;ticks&quot;:'%24TICKS',&quot;ate&quot;:'%24ATE'}'
+" ConsoleToMSBuild="true" StandardOutputImportance="low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="_TickOutput" />
+    </Exec>
+
+    <Message Importance="high" Text="$(_TickOutput)" />
+  </Target>
+
+  <!-- ═══════════════════ STATUS ═══════════════════ -->
+  <Target Name="Status">
+    <ReadLinesFromFile File="$(StateDir)/snake"><Output TaskParameter="Lines" PropertyName="_SnakeRaw" /></ReadLinesFromFile>
+    <ReadLinesFromFile File="$(StateDir)/dir"><Output TaskParameter="Lines" PropertyName="_CurDir" /></ReadLinesFromFile>
+    <ReadLinesFromFile File="$(StateDir)/food"><Output TaskParameter="Lines" PropertyName="_FoodRaw" /></ReadLinesFromFile>
+    <ReadLinesFromFile File="$(StateDir)/score"><Output TaskParameter="Lines" PropertyName="_Score" /></ReadLinesFromFile>
+    <ReadLinesFromFile File="$(StateDir)/alive"><Output TaskParameter="Lines" PropertyName="_Alive" /></ReadLinesFromFile>
+    <ReadLinesFromFile File="$(StateDir)/ticks"><Output TaskParameter="Lines" PropertyName="_Ticks" /></ReadLinesFromFile>
+    <Message Importance="high" Text='{"alive":"$(_Alive)","score":$(_Score),"snake":"$(_SnakeRaw)","food":"$(_FoodRaw)","dir":"$(_CurDir)","ticks":$(_Ticks)}' />
+  </Target>
+
   <!-- ═══════════════════ BUILD ═══════════════════ -->
-  <Target Name="Build">
+  <Target Name="Build" DependsOnTargets="New">
     <MakeDir Directories="$(OutDir)" />
 
-    <!-- Generate wall JSON -->
     <ItemGroup><_WC Include="@(Wall)" /></ItemGroup>
     <PropertyGroup>
       <_WJ>@(_WC->'[%(X),%(Y)]', ',')</_WJ>
@@ -89,210 +339,238 @@
       <_CanvasSize>$([MSBuild]::Multiply($(GridSize), $(CellSize)))</_CanvasSize>
     </PropertyGroup>
 
-    <!--
-      Write HTML via Exec+heredoc to avoid WriteLinesToFile splitting on semicolons.
-      MSBuild properties are interpolated into the command before Exec runs it.
-    -->
+    <!-- Write HTML renderer -->
     <Exec Command="
-cat &gt; &quot;$(OutFile)&quot; &lt;&lt; 'SNAKEOF'
+cat &gt; &quot;$(OutFile)&quot; &lt;&lt; 'HTMLEOF'
 &lt;!DOCTYPE html&gt;
 &lt;html lang=&quot;en&quot;&gt;
 &lt;head&gt;
 &lt;meta charset=&quot;UTF-8&quot;&gt;
-&lt;meta name=&quot;viewport&quot; content=&quot;width=device-width, initial-scale=1.0&quot;&gt;
-&lt;title&gt;MSBuild Snake&lt;/title&gt;
+&lt;title&gt;MSBuild Snake — Engine Edition&lt;/title&gt;
 &lt;style&gt;
 *{margin:0;padding:0;box-sizing:border-box}
-body{background:$(ColorBg);color:$(ColorText);font-family:'Courier New',monospace;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;overflow:hidden}
-h1{font-size:2rem;margin-bottom:0.5rem;color:$(ColorAccent)}
-.sub{color:#888;font-size:0.8rem;margin-bottom:1rem}
+body{background:$(ColorBg);color:$(ColorText);font-family:'Courier New',monospace;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh}
+h1{font-size:1.8rem;margin-bottom:0.3rem;color:$(ColorAccent)}
+.sub{color:#666;font-size:0.7rem;margin-bottom:0.8rem}
 .hud{display:flex;gap:2rem;margin-bottom:0.5rem;font-size:1.1rem}
 .hud span{color:$(ColorAccent)}
-canvas{border:2px solid $(ColorWall);border-radius:4px;image-rendering:pixelated}
-.info{margin-top:1rem;color:#666;font-size:0.75rem;text-align:center}
-.overlay{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;z-index:10;flex-direction:column;align-items:center}
-.overlay h2{font-size:2.5rem;margin-bottom:1rem}
-.overlay p{font-size:1.2rem;color:#aaa}
+canvas{border:2px solid $(ColorWall);border-radius:4px}
+.info{margin-top:0.8rem;color:#444;font-size:0.65rem;text-align:center;max-width:500px}
+.overlay{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;z-index:10;display:flex;flex-direction:column;align-items:center}
+.overlay h2{font-size:2.5rem;margin-bottom:0.5rem}
+.overlay p{font-size:1rem;color:#aaa}
+.engine{color:#ef4444;font-size:0.65rem;margin-top:0.3rem;font-weight:bold}
 .mobile-controls{display:none;margin-top:0.8rem}
 .ctrl-row{display:flex;gap:0.3rem;justify-content:center}
 .controls button{width:50px;height:50px;font-size:1.5rem;border:1px solid #444;background:#1a1a1a;color:$(ColorText);border-radius:6px;cursor:pointer;touch-action:manipulation}
-.controls button:active{background:#333}
 @media(pointer:coarse){.mobile-controls{display:block}}
 &lt;/style&gt;
 &lt;/head&gt;
 &lt;body&gt;
 &lt;h1&gt;🐍 MSBuild Snake&lt;/h1&gt;
-&lt;div class=&quot;sub&quot;&gt;Built by MSBuild • Grid:$(GridSize) Speed:$(Speed)ms Difficulty:$(Difficulty)&lt;/div&gt;
+&lt;div class=&quot;sub&quot;&gt;Every tick = a full MSBuild invocation. The build IS the engine.&lt;/div&gt;
+&lt;div class=&quot;engine&quot;&gt;ENGINE: dotnet msbuild -t:Tick -p:Dir=??? &lt;span id=&quot;tps&quot;&gt;&lt;/span&gt;&lt;/div&gt;
 &lt;div class=&quot;hud&quot;&gt;
   &lt;div&gt;Score: &lt;span id=&quot;score&quot;&gt;0&lt;/span&gt;&lt;/div&gt;
-  &lt;div&gt;Best: &lt;span id=&quot;best&quot;&gt;0&lt;/span&gt;&lt;/div&gt;
-  &lt;div&gt;Length: &lt;span id=&quot;len&quot;&gt;$(InitialLength)&lt;/span&gt;&lt;/div&gt;
+  &lt;div&gt;Ticks: &lt;span id=&quot;ticks&quot;&gt;0&lt;/span&gt;&lt;/div&gt;
+  &lt;div&gt;Builds: &lt;span id=&quot;builds&quot;&gt;0&lt;/span&gt;&lt;/div&gt;
 &lt;/div&gt;
 &lt;div style=&quot;position:relative&quot;&gt;
   &lt;canvas id=&quot;c&quot; width=&quot;$(_CanvasSize)&quot; height=&quot;$(_CanvasSize)&quot;&gt;&lt;/canvas&gt;
-  &lt;div class=&quot;overlay&quot; id=&quot;overlay&quot; style=&quot;display:flex&quot;&gt;
+  &lt;div class=&quot;overlay&quot; id=&quot;overlay&quot;&gt;
     &lt;h2 id=&quot;ovTitle&quot;&gt;🐍 READY&lt;/h2&gt;
-    &lt;p id=&quot;ovMsg&quot;&gt;Press any arrow key or WASD&lt;/p&gt;
+    &lt;p id=&quot;ovMsg&quot;&gt;Press arrow/WASD to start&lt;/p&gt;
+    &lt;p style=&quot;color:#ef4444;font-size:0.8rem;margin-top:0.5rem&quot;&gt;Each frame runs: dotnet msbuild -t:Tick&lt;/p&gt;
   &lt;/div&gt;
 &lt;/div&gt;
 &lt;div class=&quot;mobile-controls&quot;&gt;
-  &lt;div class=&quot;ctrl-row&quot;&gt;&lt;button onclick=&quot;setDir(0,-1)&quot;&gt;▲&lt;/button&gt;&lt;/div&gt;
+  &lt;div class=&quot;ctrl-row&quot;&gt;&lt;button onclick=&quot;pd('up')&quot;&gt;▲&lt;/button&gt;&lt;/div&gt;
   &lt;div class=&quot;ctrl-row&quot;&gt;
-    &lt;button onclick=&quot;setDir(-1,0)&quot;&gt;◄&lt;/button&gt;
-    &lt;button onclick=&quot;setDir(0,1)&quot;&gt;▼&lt;/button&gt;
-    &lt;button onclick=&quot;setDir(1,0)&quot;&gt;►&lt;/button&gt;
+    &lt;button onclick=&quot;pd('left')&quot;&gt;◄&lt;/button&gt;
+    &lt;button onclick=&quot;pd('down')&quot;&gt;▼&lt;/button&gt;
+    &lt;button onclick=&quot;pd('right')&quot;&gt;►&lt;/button&gt;
   &lt;/div&gt;
 &lt;/div&gt;
 &lt;div class=&quot;info&quot;&gt;
-  Built with: dotnet msbuild -t:Play -p:GridSize=$(GridSize) -p:Speed=$(Speed) -p:Difficulty=$(Difficulty)&lt;br&gt;
-  Arrow keys / WASD • Game generated by Game.proj
+  This browser is a DUMB RENDERER. It sends input to a bridge server,
+  which calls &lt;code&gt;dotnet msbuild -t:Tick -p:Dir=X&lt;/code&gt; for every frame.
+  MSBuild computes movement, collision, food — all in XML + shell. State in .state/ files.
 &lt;/div&gt;
-SNAKEOF
+HTMLEOF
 " />
 
-    <!-- Write JS separately to avoid XML escaping hell -->
+    <!-- Write JS renderer -->
     <Exec Command="
 cat &gt;&gt; &quot;$(OutFile)&quot; &lt;&lt; 'JSEOF'
 &lt;script&gt;
-const G=$(GridSize),C=$(CellSize),SPD=$(Speed),INIT=$(InitialLength),GROW=$(GrowthRate),WRAP=$(WrapAround);
-const WALLS=[$(_WallArr)];const SHOW_GRID=$(ShowGrid);
+const G=$(GridSize),C=$(CellSize),SPD=$(Speed);
 const cv=document.getElementById('c'),ctx=cv.getContext('2d');
 const COL={bg:'$(ColorBg)',grid:'$(ColorGrid)',sn:'$(ColorSnake)',sh:'$(ColorSnakeHead)',fd:'$(ColorFood)',wl:'$(ColorWall)'};
-let snake,dir,ndir,food,score,best=+localStorage.getItem('mbs_best')||0,alive,started,grow,timer;
-document.getElementById('best').textContent=best;
-function init(){
-  snake=[];for(let i=INIT-1;i&gt;=0;i--)snake.push({x:Math.floor(G/2)-i,y:Math.floor(G/2)});
-  dir={x:1,y:0};ndir={x:1,y:0};score=0;grow=0;alive=true;started=false;
-  document.getElementById('score').textContent=0;
-  document.getElementById('len').textContent=INIT;
-  placeFood();draw();
-  document.getElementById('overlay').style.display='flex';
-  document.getElementById('ovTitle').textContent='🐍 READY';
-  document.getElementById('ovMsg').textContent='Press any arrow key or WASD';
-}
-function isWall(x,y){return WALLS.some(function(w){return w[0]===x&amp;&amp;w[1]===y});}
-function placeFood(){
-  var tries=0;do{food={x:Math.floor(Math.random()*G),y:Math.floor(Math.random()*G)};tries++;}
-  while((snake.some(function(s){return s.x===food.x&amp;&amp;s.y===food.y;})||isWall(food.x,food.y))&amp;&amp;tries&lt;1000);
-}
-function draw(){
+let curDir='right',started=false,alive=true,tickTimer=null,buildCount=0;
+const BRIDGE='http://localhost:$(Port)/tick';
+
+function draw(state){
   ctx.fillStyle=COL.bg;ctx.fillRect(0,0,G*C,G*C);
-  if(SHOW_GRID){ctx.strokeStyle=COL.grid;ctx.lineWidth=0.5;
-    for(var i=0;i&lt;=G;i++){ctx.beginPath();ctx.moveTo(i*C,0);ctx.lineTo(i*C,G*C);ctx.stroke();
-      ctx.beginPath();ctx.moveTo(0,i*C);ctx.lineTo(G*C,i*C);ctx.stroke();}}
-  WALLS.forEach(function(w){ctx.fillStyle=COL.wl;ctx.fillRect(w[0]*C+1,w[1]*C+1,C-2,C-2);
-    ctx.fillStyle='#475569';ctx.fillRect(w[0]*C+3,w[1]*C+3,C-6,C-6);});
-  ctx.fillStyle=COL.fd;ctx.beginPath();
-  ctx.arc(food.x*C+C/2,food.y*C+C/2,C/2-2,0,Math.PI*2);ctx.fill();
-  ctx.fillStyle='#fca5a5';ctx.beginPath();
-  ctx.arc(food.x*C+C/2-2,food.y*C+C/2-2,C/6,0,Math.PI*2);ctx.fill();
-  snake.forEach(function(s,i){
-    var r=i===0?3:2;ctx.fillStyle=i===0?COL.sh:COL.sn;
-    ctx.beginPath();ctx.roundRect(s.x*C+1,s.y*C+1,C-2,C-2,r);ctx.fill();
-    if(i===0){ctx.fillStyle='#166534';var ex=dir.x===0?4:C/2,ey=dir.y===0?4:C/2;
-      ctx.beginPath();ctx.arc(s.x*C+ex+2,s.y*C+ey+2,2,0,Math.PI*2);ctx.fill();
-      ctx.beginPath();ctx.arc(s.x*C+C-ex-2,s.y*C+C-ey-2,2,0,Math.PI*2);ctx.fill();}
-  });
+  ctx.strokeStyle=COL.grid;ctx.lineWidth=0.5;
+  for(let i=0;i&lt;=G;i++){ctx.beginPath();ctx.moveTo(i*C,0);ctx.lineTo(i*C,G*C);ctx.stroke();
+    ctx.beginPath();ctx.moveTo(0,i*C);ctx.lineTo(G*C,i*C);ctx.stroke();}
+  if(state.walls){state.walls.split('|').filter(Boolean).forEach(w=&gt;{
+    const[x,y]=w.split(',').map(Number);
+    ctx.fillStyle=COL.wl;ctx.fillRect(x*C+1,y*C+1,C-2,C-2);
+    ctx.fillStyle='#475569';ctx.fillRect(x*C+3,y*C+3,C-6,C-6);});}
+  if(state.food){const[fx,fy]=state.food.split(',').map(Number);
+    ctx.fillStyle=COL.fd;ctx.beginPath();ctx.arc(fx*C+C/2,fy*C+C/2,C/2-2,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle='#fca5a5';ctx.beginPath();ctx.arc(fx*C+C/2-2,fy*C+C/2-2,C/6,0,Math.PI*2);ctx.fill();}
+  if(state.snake){const segs=state.snake.split('|');
+    segs.forEach((s,i)=&gt;{const[x,y]=s.split(',').map(Number);
+      ctx.fillStyle=i===0?COL.sh:COL.sn;
+      ctx.beginPath();ctx.roundRect(x*C+1,y*C+1,C-2,C-2,i===0?3:2);ctx.fill();
+      if(i===0){ctx.fillStyle='#166534';
+        const d=state.dir||'right';
+        let ex=C/2,ey=4;if(d==='left'||d==='right'){ex=4;ey=C/2;}
+        ctx.beginPath();ctx.arc(x*C+ex+2,y*C+ey+2,2,0,Math.PI*2);ctx.fill();
+        ctx.beginPath();ctx.arc(x*C+C-ex-2,y*C+C-ey-2,2,0,Math.PI*2);ctx.fill();}
+    });}
 }
-function step(){
-  if(!alive)return;dir={x:ndir.x,y:ndir.y};
-  var nx=snake[0].x+dir.x,ny=snake[0].y+dir.y;
-  if(WRAP){nx=(nx+G)%G;ny=(ny+G)%G;}
-  if(!WRAP&amp;&amp;(nx&lt;0||nx&gt;=G||ny&lt;0||ny&gt;=G)){die();return;}
-  if(snake.some(function(s){return s.x===nx&amp;&amp;s.y===ny;})){die();return;}
-  if(isWall(nx,ny)){die();return;}
-  snake.unshift({x:nx,y:ny});
-  if(nx===food.x&amp;&amp;ny===food.y){score+=10;grow+=GROW;
-    document.getElementById('score').textContent=score;
-    placeFood();}
-  if(grow&gt;0){grow--;document.getElementById('len').textContent=snake.length;}
-  else{snake.pop();}
-  draw();
+
+async function tick(){
+  if(!alive)return;
+  const t0=performance.now();
+  try{
+    buildCount++;
+    document.getElementById('builds').textContent=buildCount;
+    const r=await fetch(BRIDGE+'?dir='+curDir);
+    const state=await r.json();
+    const ms=Math.round(performance.now()-t0);
+    document.getElementById('tps').textContent='('+ms+'ms/build)';
+    document.getElementById('score').textContent=state.score;
+    document.getElementById('ticks').textContent=state.ticks;
+    draw(state);
+    if(!state.alive){alive=false;clearInterval(tickTimer);
+      document.getElementById('overlay').style.display='flex';
+      document.getElementById('ovTitle').textContent='💀 GAME OVER';
+      document.getElementById('ovMsg').textContent='Score: '+state.score+' ('+state.cause+') — Refresh to restart';
+      ctx.fillStyle='rgba(0,0,0,0.4)';ctx.fillRect(0,0,G*C,G*C);}
+  }catch(e){document.getElementById('tps').textContent='(ERROR: bridge down?)';}
 }
-function die(){
-  alive=false;clearInterval(timer);
-  if(score&gt;best){best=score;localStorage.setItem('mbs_best',best);
-    document.getElementById('best').textContent=best;}
-  document.getElementById('overlay').style.display='flex';
-  document.getElementById('ovTitle').textContent='💀 GAME OVER';
-  document.getElementById('ovMsg').textContent='Score: '+score+' — Press any key';
-  ctx.fillStyle='rgba(0,0,0,0.5)';ctx.fillRect(0,0,G*C,G*C);
-}
-function setDir(dx,dy){
+
+function pd(d){
+  curDir=d;
   if(!started){started=true;
     document.getElementById('overlay').style.display='none';
-    timer=setInterval(step,SPD);}
-  if(!alive){init();return;}
-  if(dir.x===-dx&amp;&amp;dir.y===-dy)return;
-  if(dx!==0||dy!==0){ndir={x:dx,y:dy};}
+    tickTimer=setInterval(tick,SPD);}
 }
+
 document.addEventListener('keydown',function(e){
-  var m={ArrowUp:[0,-1],ArrowDown:[0,1],ArrowLeft:[-1,0],ArrowRight:[1,0],
-    w:[0,-1],s:[0,1],a:[-1,0],d:[1,0],W:[0,-1],S:[0,1],A:[-1,0],D:[1,0]};
-  var d=m[e.key];if(d){e.preventDefault();setDir(d[0],d[1]);}
+  const m={ArrowUp:'up',ArrowDown:'down',ArrowLeft:'left',ArrowRight:'right',
+    w:'up',s:'down',a:'left',d:'right',W:'up',S:'down',A:'left',D:'right'};
+  if(m[e.key]){e.preventDefault();pd(m[e.key]);}
 });
-var tx,ty;
+
+let tx,ty;
 cv.addEventListener('touchstart',function(e){tx=e.touches[0].clientX;ty=e.touches[0].clientY;});
-cv.addEventListener('touchend',function(e){var dx=e.changedTouches[0].clientX-tx,dy=e.changedTouches[0].clientY-ty;
-  Math.abs(dx)&gt;Math.abs(dy)?setDir(dx&gt;0?1:-1,0):setDir(0,dy&gt;0?1:-1);});
-init();
+cv.addEventListener('touchend',function(e){
+  const dx=e.changedTouches[0].clientX-tx,dy=e.changedTouches[0].clientY-ty;
+  Math.abs(dx)&gt;Math.abs(dy)?pd(dx&gt;0?'right':'left'):pd(dy&gt;0?'down':'up');
+});
+
+fetch(BRIDGE+'?dir=').then(r=&gt;r.json()).then(draw).catch(()=&gt;{});
 &lt;/script&gt;
 &lt;/body&gt;
 &lt;/html&gt;
 JSEOF
 " />
 
+    <!-- Write bridge server -->
+    <Exec Command="
+cat &gt; &quot;$(BridgeFile)&quot; &lt;&lt; 'PYEOF'
+#!/usr/bin/env python3
+# MSBuild Snake Bridge — each request runs dotnet msbuild -t:Tick
+import http.server, subprocess, os
+PORT = $(Port)
+PROJ = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'Game.proj')
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if not self.path.startswith('/tick'):
+            self.send_response(404); self.end_headers(); return
+        d = ''
+        if '?dir=' in self.path:
+            d = self.path.split('?dir=')[1].split('&amp;')[0]
+        cmd = ['dotnet', 'msbuild', PROJ, '-t:Tick', '-nologo', '-v:minimal']
+        if d in ('up','down','left','right'):
+            cmd.append('-p:Dir=' + d)
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            out = r.stdout.strip()
+            jl = ''
+            for ln in out.split('\n'):
+                ln = ln.strip()
+                if ln.startswith('{'):
+                    jl = ln; break
+            if not jl:
+                jl = '{}'
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(jl.encode())
+        except Exception:
+            self.send_response(500)
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(b'{}')
+    def log_message(self, *a): pass
+print('MSBuild Snake Bridge on http://localhost:' + str(PORT))
+print('Each request runs: dotnet msbuild -t:Tick -p:Dir=X')
+http.server.HTTPServer(('127.0.0.1', PORT), H).serve_forever()
+PYEOF
+chmod +x &quot;$(BridgeFile)&quot;
+" />
+
     <Message Importance="high" Text=" " />
-    <Message Importance="high" Text="$(_BOLD)$(_GRN)  🐍 MSBuild Snake — Built!$(_RST)" />
+    <Message Importance="high" Text="$(_BOLD)$(_GRN)  🐍 MSBuild Snake v2 — BUILT!$(_RST)" />
     <Message Importance="high" Text="$(_DIM)  ════════════════════════════════════$(_RST)" />
-    <Message Importance="high" Text="  Output: $(_YLW)$(OutFile)$(_RST)" />
-    <Message Importance="high" Text="  Grid:   $(GridSize)×$(GridSize)  Speed: $(Speed)ms" />
-    <Message Importance="high" Text="  Difficulty: $(Difficulty)" />
+    <Message Importance="high" Text="$(_BOLD)$(_RED)  ⚡ Every frame = a full MSBuild invocation$(_RST)" />
     <Message Importance="high" Text=" " />
-    <Message Importance="high" Text="  $(_DIM)Open in browser or run: dotnet msbuild -t:Play$(_RST)" />
+    <Message Importance="high" Text="  1. Start bridge: $(_YLW)python3 $(BridgeFile)$(_RST)" />
+    <Message Importance="high" Text="  2. Open:         $(_YLW)$(OutFile)$(_RST)" />
+    <Message Importance="high" Text=" " />
+    <Message Importance="high" Text="  Grid: $(GridSize)×$(GridSize)  Speed: $(Speed)ms  Difficulty: $(Difficulty)" />
     <Message Importance="high" Text=" " />
   </Target>
 
   <!-- ═══════════════════ PLAY ═══════════════════ -->
   <Target Name="Play" DependsOnTargets="Build">
-    <Exec Command="xdg-open &quot;$(OutFile)&quot; 2>/dev/null || open &quot;$(OutFile)&quot; 2>/dev/null || start &quot;$(OutFile)&quot; 2>/dev/null || echo 'Open $(OutFile) in your browser'" IgnoreExitCode="true" />
+    <Message Importance="high" Text="$(_BOLD)$(_CYN)  Starting bridge server...$(_RST)" />
+    <Exec Command="python3 &quot;$(BridgeFile)&quot;" />
   </Target>
 
   <!-- ═══════════════════ HELP ═══════════════════ -->
   <Target Name="Help">
     <Message Importance="high" Text=" " />
-    <Message Importance="high" Text="$(_BOLD)$(_CYN)  🐍 MSBuild Snake$(_RST)" />
+    <Message Importance="high" Text="$(_BOLD)$(_CYN)  🐍 MSBuild Snake v2 — Engine Edition$(_RST)" />
     <Message Importance="high" Text="$(_DIM)  ═══════════════════════════════════════$(_RST)" />
+    <Message Importance="high" Text="$(_BOLD)$(_RED)  Every game tick is a full MSBuild build invocation.$(_RST)" />
     <Message Importance="high" Text=" " />
     <Message Importance="high" Text="  $(_BOLD)Targets:$(_RST)" />
-    <Message Importance="high" Text="    $(_YLW)dotnet msbuild -t:Build$(_RST)   $(_DIM)Generate the game HTML$(_RST)" />
-    <Message Importance="high" Text="    $(_YLW)dotnet msbuild -t:Play$(_RST)    $(_DIM)Build and open in browser$(_RST)" />
-    <Message Importance="high" Text="    $(_YLW)dotnet msbuild -t:Help$(_RST)    $(_DIM)This screen$(_RST)" />
-    <Message Importance="high" Text="    $(_YLW)dotnet msbuild -t:Clean$(_RST)   $(_DIM)Remove build output$(_RST)" />
+    <Message Importance="high" Text="    $(_YLW)-t:Play$(_RST)     Build + start bridge server" />
+    <Message Importance="high" Text="    $(_YLW)-t:Build$(_RST)    Generate HTML + bridge + init game" />
+    <Message Importance="high" Text="    $(_YLW)-t:New$(_RST)      Reset game state" />
+    <Message Importance="high" Text="    $(_YLW)-t:Tick$(_RST)     Advance one frame (THE ENGINE)" />
+    <Message Importance="high" Text="    $(_YLW)-t:Status$(_RST)   Current state as JSON" />
+    <Message Importance="high" Text="    $(_YLW)-t:Help$(_RST)     This screen" />
     <Message Importance="high" Text=" " />
-    <Message Importance="high" Text="  $(_BOLD)Properties (override with -p:Name=Value):$(_RST)" />
-    <Message Importance="high" Text="    $(_YLW)GridSize$(_RST)       Grid dimensions         $(_DIM)(default: 20)$(_RST)" />
-    <Message Importance="high" Text="    $(_YLW)CellSize$(_RST)       Pixel size per cell      $(_DIM)(default: 20)$(_RST)" />
-    <Message Importance="high" Text="    $(_YLW)Speed$(_RST)          Ms per tick (lower=fast)  $(_DIM)(default: 120)$(_RST)" />
-    <Message Importance="high" Text="    $(_YLW)Difficulty$(_RST)     easy/normal/hard/insane   $(_DIM)(default: normal)$(_RST)" />
-    <Message Importance="high" Text="    $(_YLW)WrapAround$(_RST)     Snake wraps edges         $(_DIM)(default: false)$(_RST)" />
-    <Message Importance="high" Text="    $(_YLW)ShowGrid$(_RST)       Show grid lines           $(_DIM)(default: true)$(_RST)" />
-    <Message Importance="high" Text="    $(_YLW)ColorSnake$(_RST)     Snake body color (CSS)    $(_DIM)(default: #4ade80)$(_RST)" />
-    <Message Importance="high" Text="    $(_YLW)ColorFood$(_RST)      Food color (CSS)          $(_DIM)(default: #ef4444)$(_RST)" />
-    <Message Importance="high" Text="    $(_YLW)InitialLength$(_RST)  Starting length           $(_DIM)(default: 3)$(_RST)" />
-    <Message Importance="high" Text="    $(_YLW)GrowthRate$(_RST)     Segments per food          $(_DIM)(default: 1)$(_RST)" />
-    <Message Importance="high" Text=" " />
-    <Message Importance="high" Text="  $(_BOLD)Examples:$(_RST)" />
-    <Message Importance="high" Text="    $(_DIM)dotnet msbuild -t:Play -p:Difficulty=insane$(_RST)" />
-    <Message Importance="high" Text="    $(_DIM)dotnet msbuild -t:Play -p:GridSize=30 -p:Speed=60 -p:WrapAround=true$(_RST)" />
-    <Message Importance="high" Text="    $(_DIM)dotnet msbuild -t:Play -p:ColorSnake=#ff6b6b -p:ColorBg=#1e1b4b$(_RST)" />
+    <Message Importance="high" Text="  $(_BOLD)Architecture:$(_RST)" />
+    <Message Importance="high" Text="    Browser ──(HTTP)──▸ bridge.py ──(exec)──▸ dotnet msbuild -t:Tick" />
+    <Message Importance="high" Text="    MSBuild reads .state/ ──▸ computes physics ──▸ writes .state/" />
+    <Message Importance="high" Text="    Returns JSON ◂── bridge ◂── browser renders" />
     <Message Importance="high" Text=" " />
   </Target>
 
   <!-- ═══════════════════ CLEAN ═══════════════════ -->
   <Target Name="Clean">
     <RemoveDir Directories="$(OutDir)" />
-    <Message Importance="high" Text="  $(_DIM)🧹 Cleaned build output$(_RST)" />
+    <RemoveDir Directories="$(StateDir)" />
+    <Message Importance="high" Text="  $(_DIM)🧹 Cleaned$(_RST)" />
   </Target>
-
 </Project>
