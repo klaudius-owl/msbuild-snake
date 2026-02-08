@@ -1,0 +1,298 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!--
+    ╔══════════════════════════════════════════════════════════════════╗
+    ║                    🐍  MSBuild Snake  🐍                        ║
+    ║                                                                  ║
+    ║  A real-time Snake game generated entirely by MSBuild.           ║
+    ║  The build IS the game. MSBuild properties control gameplay.     ║
+    ║                                                                  ║
+    ║  Build:  dotnet msbuild -t:Build                                 ║
+    ║  Play:   dotnet msbuild -t:Play                                  ║
+    ║  Custom: dotnet msbuild -t:Play -p:GridSize=30 -p:Speed=80      ║
+    ╚══════════════════════════════════════════════════════════════════╝
+  -->
+
+  <!-- ═══════════════════ GAME CONFIGURATION ═══════════════════ -->
+  <PropertyGroup>
+    <GridSize>20</GridSize>
+    <CellSize>20</CellSize>
+    <Speed>120</Speed>
+    <ColorBg>#0a0a0a</ColorBg>
+    <ColorGrid>#1a1a1a</ColorGrid>
+    <ColorSnake>#4ade80</ColorSnake>
+    <ColorSnakeHead>#22c55e</ColorSnakeHead>
+    <ColorFood>#ef4444</ColorFood>
+    <ColorWall>#64748b</ColorWall>
+    <ColorText>#e2e8f0</ColorText>
+    <ColorAccent>#facc15</ColorAccent>
+    <InitialLength>3</InitialLength>
+    <GrowthRate>1</GrowthRate>
+    <WrapAround>false</WrapAround>
+    <ShowGrid>true</ShowGrid>
+    <Difficulty>normal</Difficulty>
+    <OutDir>$(MSBuildProjectDirectory)/build</OutDir>
+    <OutFile>$(OutDir)/snake.html</OutFile>
+    <_E>%1B</_E>
+    <_RST>$(_E)[0m</_RST>
+    <_BOLD>$(_E)[1m</_BOLD>
+    <_DIM>$(_E)[2m</_DIM>
+    <_GRN>$(_E)[32m</_GRN>
+    <_YLW>$(_E)[33m</_YLW>
+    <_CYN>$(_E)[36m</_CYN>
+  </PropertyGroup>
+
+  <!-- Difficulty presets -->
+  <PropertyGroup Condition="'$(Difficulty)' == 'easy'"><Speed>180</Speed></PropertyGroup>
+  <PropertyGroup Condition="'$(Difficulty)' == 'hard'"><Speed>80</Speed></PropertyGroup>
+  <PropertyGroup Condition="'$(Difficulty)' == 'insane'"><Speed>45</Speed></PropertyGroup>
+
+  <!-- Wall layouts for hard/insane -->
+  <ItemGroup Condition="'$(Difficulty)' == 'hard' Or '$(Difficulty)' == 'insane'">
+    <Wall Include="w1"><X>10</X><Y>5</Y></Wall>
+    <Wall Include="w2"><X>10</X><Y>6</Y></Wall>
+    <Wall Include="w3"><X>10</X><Y>7</Y></Wall>
+    <Wall Include="w4"><X>10</X><Y>12</Y></Wall>
+    <Wall Include="w5"><X>10</X><Y>13</Y></Wall>
+    <Wall Include="w6"><X>10</X><Y>14</Y></Wall>
+    <Wall Include="w7"><X>5</X><Y>10</Y></Wall>
+    <Wall Include="w8"><X>6</X><Y>10</Y></Wall>
+    <Wall Include="w9"><X>7</X><Y>10</Y></Wall>
+    <Wall Include="w10"><X>12</X><Y>10</Y></Wall>
+    <Wall Include="w11"><X>13</X><Y>10</Y></Wall>
+    <Wall Include="w12"><X>14</X><Y>10</Y></Wall>
+  </ItemGroup>
+  <ItemGroup Condition="'$(Difficulty)' == 'insane'">
+    <Wall Include="w13"><X>4</X><Y>4</Y></Wall>
+    <Wall Include="w14"><X>5</X><Y>4</Y></Wall>
+    <Wall Include="w15"><X>4</X><Y>5</Y></Wall>
+    <Wall Include="w16"><X>15</X><Y>4</Y></Wall>
+    <Wall Include="w17"><X>16</X><Y>4</Y></Wall>
+    <Wall Include="w18"><X>15</X><Y>5</Y></Wall>
+    <Wall Include="w19"><X>4</X><Y>15</Y></Wall>
+    <Wall Include="w20"><X>5</X><Y>15</Y></Wall>
+    <Wall Include="w21"><X>4</X><Y>16</Y></Wall>
+    <Wall Include="w22"><X>15</X><Y>15</Y></Wall>
+    <Wall Include="w23"><X>16</X><Y>15</Y></Wall>
+    <Wall Include="w24"><X>15</X><Y>16</Y></Wall>
+  </ItemGroup>
+
+  <!-- ═══════════════════ BUILD ═══════════════════ -->
+  <Target Name="Build">
+    <MakeDir Directories="$(OutDir)" />
+
+    <!-- Generate wall JSON -->
+    <ItemGroup><_WC Include="@(Wall)" /></ItemGroup>
+    <PropertyGroup>
+      <_WJ>@(_WC->'[%(X),%(Y)]', ',')</_WJ>
+      <_WallArr Condition="'$(_WJ)' != ''">$(_WJ)</_WallArr>
+      <_WallArr Condition="'$(_WJ)' == ''"></_WallArr>
+      <_CanvasSize>$([MSBuild]::Multiply($(GridSize), $(CellSize)))</_CanvasSize>
+    </PropertyGroup>
+
+    <!--
+      Write HTML via Exec+heredoc to avoid WriteLinesToFile splitting on semicolons.
+      MSBuild properties are interpolated into the command before Exec runs it.
+    -->
+    <Exec Command="
+cat &gt; &quot;$(OutFile)&quot; &lt;&lt; 'SNAKEOF'
+&lt;!DOCTYPE html&gt;
+&lt;html lang=&quot;en&quot;&gt;
+&lt;head&gt;
+&lt;meta charset=&quot;UTF-8&quot;&gt;
+&lt;meta name=&quot;viewport&quot; content=&quot;width=device-width, initial-scale=1.0&quot;&gt;
+&lt;title&gt;MSBuild Snake&lt;/title&gt;
+&lt;style&gt;
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:$(ColorBg);color:$(ColorText);font-family:'Courier New',monospace;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;overflow:hidden}
+h1{font-size:2rem;margin-bottom:0.5rem;color:$(ColorAccent)}
+.sub{color:#888;font-size:0.8rem;margin-bottom:1rem}
+.hud{display:flex;gap:2rem;margin-bottom:0.5rem;font-size:1.1rem}
+.hud span{color:$(ColorAccent)}
+canvas{border:2px solid $(ColorWall);border-radius:4px;image-rendering:pixelated}
+.info{margin-top:1rem;color:#666;font-size:0.75rem;text-align:center}
+.overlay{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;z-index:10;flex-direction:column;align-items:center}
+.overlay h2{font-size:2.5rem;margin-bottom:1rem}
+.overlay p{font-size:1.2rem;color:#aaa}
+.mobile-controls{display:none;margin-top:0.8rem}
+.ctrl-row{display:flex;gap:0.3rem;justify-content:center}
+.controls button{width:50px;height:50px;font-size:1.5rem;border:1px solid #444;background:#1a1a1a;color:$(ColorText);border-radius:6px;cursor:pointer;touch-action:manipulation}
+.controls button:active{background:#333}
+@media(pointer:coarse){.mobile-controls{display:block}}
+&lt;/style&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;h1&gt;🐍 MSBuild Snake&lt;/h1&gt;
+&lt;div class=&quot;sub&quot;&gt;Built by MSBuild • Grid:$(GridSize) Speed:$(Speed)ms Difficulty:$(Difficulty)&lt;/div&gt;
+&lt;div class=&quot;hud&quot;&gt;
+  &lt;div&gt;Score: &lt;span id=&quot;score&quot;&gt;0&lt;/span&gt;&lt;/div&gt;
+  &lt;div&gt;Best: &lt;span id=&quot;best&quot;&gt;0&lt;/span&gt;&lt;/div&gt;
+  &lt;div&gt;Length: &lt;span id=&quot;len&quot;&gt;$(InitialLength)&lt;/span&gt;&lt;/div&gt;
+&lt;/div&gt;
+&lt;div style=&quot;position:relative&quot;&gt;
+  &lt;canvas id=&quot;c&quot; width=&quot;$(_CanvasSize)&quot; height=&quot;$(_CanvasSize)&quot;&gt;&lt;/canvas&gt;
+  &lt;div class=&quot;overlay&quot; id=&quot;overlay&quot; style=&quot;display:flex&quot;&gt;
+    &lt;h2 id=&quot;ovTitle&quot;&gt;🐍 READY&lt;/h2&gt;
+    &lt;p id=&quot;ovMsg&quot;&gt;Press any arrow key or WASD&lt;/p&gt;
+  &lt;/div&gt;
+&lt;/div&gt;
+&lt;div class=&quot;mobile-controls&quot;&gt;
+  &lt;div class=&quot;ctrl-row&quot;&gt;&lt;button onclick=&quot;setDir(0,-1)&quot;&gt;▲&lt;/button&gt;&lt;/div&gt;
+  &lt;div class=&quot;ctrl-row&quot;&gt;
+    &lt;button onclick=&quot;setDir(-1,0)&quot;&gt;◄&lt;/button&gt;
+    &lt;button onclick=&quot;setDir(0,1)&quot;&gt;▼&lt;/button&gt;
+    &lt;button onclick=&quot;setDir(1,0)&quot;&gt;►&lt;/button&gt;
+  &lt;/div&gt;
+&lt;/div&gt;
+&lt;div class=&quot;info&quot;&gt;
+  Built with: dotnet msbuild -t:Play -p:GridSize=$(GridSize) -p:Speed=$(Speed) -p:Difficulty=$(Difficulty)&lt;br&gt;
+  Arrow keys / WASD • Game generated by Game.proj
+&lt;/div&gt;
+SNAKEOF
+" />
+
+    <!-- Write JS separately to avoid XML escaping hell -->
+    <Exec Command="
+cat &gt;&gt; &quot;$(OutFile)&quot; &lt;&lt; 'JSEOF'
+&lt;script&gt;
+const G=$(GridSize),C=$(CellSize),SPD=$(Speed),INIT=$(InitialLength),GROW=$(GrowthRate),WRAP=$(WrapAround);
+const WALLS=[$(_WallArr)];const SHOW_GRID=$(ShowGrid);
+const cv=document.getElementById('c'),ctx=cv.getContext('2d');
+const COL={bg:'$(ColorBg)',grid:'$(ColorGrid)',sn:'$(ColorSnake)',sh:'$(ColorSnakeHead)',fd:'$(ColorFood)',wl:'$(ColorWall)'};
+let snake,dir,ndir,food,score,best=+localStorage.getItem('mbs_best')||0,alive,started,grow,timer;
+document.getElementById('best').textContent=best;
+function init(){
+  snake=[];for(let i=INIT-1;i&gt;=0;i--)snake.push({x:Math.floor(G/2)-i,y:Math.floor(G/2)});
+  dir={x:1,y:0};ndir={x:1,y:0};score=0;grow=0;alive=true;started=false;
+  document.getElementById('score').textContent=0;
+  document.getElementById('len').textContent=INIT;
+  placeFood();draw();
+  document.getElementById('overlay').style.display='flex';
+  document.getElementById('ovTitle').textContent='🐍 READY';
+  document.getElementById('ovMsg').textContent='Press any arrow key or WASD';
+}
+function isWall(x,y){return WALLS.some(function(w){return w[0]===x&amp;&amp;w[1]===y});}
+function placeFood(){
+  var tries=0;do{food={x:Math.floor(Math.random()*G),y:Math.floor(Math.random()*G)};tries++;}
+  while((snake.some(function(s){return s.x===food.x&amp;&amp;s.y===food.y;})||isWall(food.x,food.y))&amp;&amp;tries&lt;1000);
+}
+function draw(){
+  ctx.fillStyle=COL.bg;ctx.fillRect(0,0,G*C,G*C);
+  if(SHOW_GRID){ctx.strokeStyle=COL.grid;ctx.lineWidth=0.5;
+    for(var i=0;i&lt;=G;i++){ctx.beginPath();ctx.moveTo(i*C,0);ctx.lineTo(i*C,G*C);ctx.stroke();
+      ctx.beginPath();ctx.moveTo(0,i*C);ctx.lineTo(G*C,i*C);ctx.stroke();}}
+  WALLS.forEach(function(w){ctx.fillStyle=COL.wl;ctx.fillRect(w[0]*C+1,w[1]*C+1,C-2,C-2);
+    ctx.fillStyle='#475569';ctx.fillRect(w[0]*C+3,w[1]*C+3,C-6,C-6);});
+  ctx.fillStyle=COL.fd;ctx.beginPath();
+  ctx.arc(food.x*C+C/2,food.y*C+C/2,C/2-2,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#fca5a5';ctx.beginPath();
+  ctx.arc(food.x*C+C/2-2,food.y*C+C/2-2,C/6,0,Math.PI*2);ctx.fill();
+  snake.forEach(function(s,i){
+    var r=i===0?3:2;ctx.fillStyle=i===0?COL.sh:COL.sn;
+    ctx.beginPath();ctx.roundRect(s.x*C+1,s.y*C+1,C-2,C-2,r);ctx.fill();
+    if(i===0){ctx.fillStyle='#166534';var ex=dir.x===0?4:C/2,ey=dir.y===0?4:C/2;
+      ctx.beginPath();ctx.arc(s.x*C+ex+2,s.y*C+ey+2,2,0,Math.PI*2);ctx.fill();
+      ctx.beginPath();ctx.arc(s.x*C+C-ex-2,s.y*C+C-ey-2,2,0,Math.PI*2);ctx.fill();}
+  });
+}
+function step(){
+  if(!alive)return;dir={x:ndir.x,y:ndir.y};
+  var nx=snake[0].x+dir.x,ny=snake[0].y+dir.y;
+  if(WRAP){nx=(nx+G)%G;ny=(ny+G)%G;}
+  if(!WRAP&amp;&amp;(nx&lt;0||nx&gt;=G||ny&lt;0||ny&gt;=G)){die();return;}
+  if(snake.some(function(s){return s.x===nx&amp;&amp;s.y===ny;})){die();return;}
+  if(isWall(nx,ny)){die();return;}
+  snake.unshift({x:nx,y:ny});
+  if(nx===food.x&amp;&amp;ny===food.y){score+=10;grow+=GROW;
+    document.getElementById('score').textContent=score;
+    placeFood();}
+  if(grow&gt;0){grow--;document.getElementById('len').textContent=snake.length;}
+  else{snake.pop();}
+  draw();
+}
+function die(){
+  alive=false;clearInterval(timer);
+  if(score&gt;best){best=score;localStorage.setItem('mbs_best',best);
+    document.getElementById('best').textContent=best;}
+  document.getElementById('overlay').style.display='flex';
+  document.getElementById('ovTitle').textContent='💀 GAME OVER';
+  document.getElementById('ovMsg').textContent='Score: '+score+' — Press any key';
+  ctx.fillStyle='rgba(0,0,0,0.5)';ctx.fillRect(0,0,G*C,G*C);
+}
+function setDir(dx,dy){
+  if(!started){started=true;
+    document.getElementById('overlay').style.display='none';
+    timer=setInterval(step,SPD);}
+  if(!alive){init();return;}
+  if(dir.x===-dx&amp;&amp;dir.y===-dy)return;
+  if(dx!==0||dy!==0){ndir={x:dx,y:dy};}
+}
+document.addEventListener('keydown',function(e){
+  var m={ArrowUp:[0,-1],ArrowDown:[0,1],ArrowLeft:[-1,0],ArrowRight:[1,0],
+    w:[0,-1],s:[0,1],a:[-1,0],d:[1,0],W:[0,-1],S:[0,1],A:[-1,0],D:[1,0]};
+  var d=m[e.key];if(d){e.preventDefault();setDir(d[0],d[1]);}
+});
+var tx,ty;
+cv.addEventListener('touchstart',function(e){tx=e.touches[0].clientX;ty=e.touches[0].clientY;});
+cv.addEventListener('touchend',function(e){var dx=e.changedTouches[0].clientX-tx,dy=e.changedTouches[0].clientY-ty;
+  Math.abs(dx)&gt;Math.abs(dy)?setDir(dx&gt;0?1:-1,0):setDir(0,dy&gt;0?1:-1);});
+init();
+&lt;/script&gt;
+&lt;/body&gt;
+&lt;/html&gt;
+JSEOF
+" />
+
+    <Message Importance="high" Text=" " />
+    <Message Importance="high" Text="$(_BOLD)$(_GRN)  🐍 MSBuild Snake — Built!$(_RST)" />
+    <Message Importance="high" Text="$(_DIM)  ════════════════════════════════════$(_RST)" />
+    <Message Importance="high" Text="  Output: $(_YLW)$(OutFile)$(_RST)" />
+    <Message Importance="high" Text="  Grid:   $(GridSize)×$(GridSize)  Speed: $(Speed)ms" />
+    <Message Importance="high" Text="  Difficulty: $(Difficulty)" />
+    <Message Importance="high" Text=" " />
+    <Message Importance="high" Text="  $(_DIM)Open in browser or run: dotnet msbuild -t:Play$(_RST)" />
+    <Message Importance="high" Text=" " />
+  </Target>
+
+  <!-- ═══════════════════ PLAY ═══════════════════ -->
+  <Target Name="Play" DependsOnTargets="Build">
+    <Exec Command="xdg-open &quot;$(OutFile)&quot; 2>/dev/null || open &quot;$(OutFile)&quot; 2>/dev/null || start &quot;$(OutFile)&quot; 2>/dev/null || echo 'Open $(OutFile) in your browser'" IgnoreExitCode="true" />
+  </Target>
+
+  <!-- ═══════════════════ HELP ═══════════════════ -->
+  <Target Name="Help">
+    <Message Importance="high" Text=" " />
+    <Message Importance="high" Text="$(_BOLD)$(_CYN)  🐍 MSBuild Snake$(_RST)" />
+    <Message Importance="high" Text="$(_DIM)  ═══════════════════════════════════════$(_RST)" />
+    <Message Importance="high" Text=" " />
+    <Message Importance="high" Text="  $(_BOLD)Targets:$(_RST)" />
+    <Message Importance="high" Text="    $(_YLW)dotnet msbuild -t:Build$(_RST)   $(_DIM)Generate the game HTML$(_RST)" />
+    <Message Importance="high" Text="    $(_YLW)dotnet msbuild -t:Play$(_RST)    $(_DIM)Build and open in browser$(_RST)" />
+    <Message Importance="high" Text="    $(_YLW)dotnet msbuild -t:Help$(_RST)    $(_DIM)This screen$(_RST)" />
+    <Message Importance="high" Text="    $(_YLW)dotnet msbuild -t:Clean$(_RST)   $(_DIM)Remove build output$(_RST)" />
+    <Message Importance="high" Text=" " />
+    <Message Importance="high" Text="  $(_BOLD)Properties (override with -p:Name=Value):$(_RST)" />
+    <Message Importance="high" Text="    $(_YLW)GridSize$(_RST)       Grid dimensions         $(_DIM)(default: 20)$(_RST)" />
+    <Message Importance="high" Text="    $(_YLW)CellSize$(_RST)       Pixel size per cell      $(_DIM)(default: 20)$(_RST)" />
+    <Message Importance="high" Text="    $(_YLW)Speed$(_RST)          Ms per tick (lower=fast)  $(_DIM)(default: 120)$(_RST)" />
+    <Message Importance="high" Text="    $(_YLW)Difficulty$(_RST)     easy/normal/hard/insane   $(_DIM)(default: normal)$(_RST)" />
+    <Message Importance="high" Text="    $(_YLW)WrapAround$(_RST)     Snake wraps edges         $(_DIM)(default: false)$(_RST)" />
+    <Message Importance="high" Text="    $(_YLW)ShowGrid$(_RST)       Show grid lines           $(_DIM)(default: true)$(_RST)" />
+    <Message Importance="high" Text="    $(_YLW)ColorSnake$(_RST)     Snake body color (CSS)    $(_DIM)(default: #4ade80)$(_RST)" />
+    <Message Importance="high" Text="    $(_YLW)ColorFood$(_RST)      Food color (CSS)          $(_DIM)(default: #ef4444)$(_RST)" />
+    <Message Importance="high" Text="    $(_YLW)InitialLength$(_RST)  Starting length           $(_DIM)(default: 3)$(_RST)" />
+    <Message Importance="high" Text="    $(_YLW)GrowthRate$(_RST)     Segments per food          $(_DIM)(default: 1)$(_RST)" />
+    <Message Importance="high" Text=" " />
+    <Message Importance="high" Text="  $(_BOLD)Examples:$(_RST)" />
+    <Message Importance="high" Text="    $(_DIM)dotnet msbuild -t:Play -p:Difficulty=insane$(_RST)" />
+    <Message Importance="high" Text="    $(_DIM)dotnet msbuild -t:Play -p:GridSize=30 -p:Speed=60 -p:WrapAround=true$(_RST)" />
+    <Message Importance="high" Text="    $(_DIM)dotnet msbuild -t:Play -p:ColorSnake=#ff6b6b -p:ColorBg=#1e1b4b$(_RST)" />
+    <Message Importance="high" Text=" " />
+  </Target>
+
+  <!-- ═══════════════════ CLEAN ═══════════════════ -->
+  <Target Name="Clean">
+    <RemoveDir Directories="$(OutDir)" />
+    <Message Importance="high" Text="  $(_DIM)🧹 Cleaned build output$(_RST)" />
+  </Target>
+
+</Project>
